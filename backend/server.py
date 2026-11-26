@@ -18,13 +18,38 @@ from trainer import TrainingManager
 
 PORT = int(os.environ.get("PY_BACKEND_PORT") or os.environ.get("PORT") or "8001")
 HOST = os.environ.get("HOST", "0.0.0.0")
-ALLOWED_ORIGINS = [
-    o.strip().rstrip("/")
-    for o in os.environ.get("ALLOWED_ORIGINS", "").split(",")
-    if o.strip()
-]
+def _parse_allowed_origins(raw: str) -> list[str]:
+    items: list[str] = []
+    for entry in raw.split(","):
+        cleaned = entry.strip().strip('"').strip("'").rstrip("/")
+        if not cleaned:
+            continue
+        items.append(cleaned)
+        if cleaned != "*" and not cleaned.startswith(("http://", "https://", "*.")):
+            items.append(f"https://{cleaned}")
+    return items
+
+
+ALLOWED_ORIGINS = _parse_allowed_origins(os.environ.get("ALLOWED_ORIGINS", ""))
 
 manager = TrainingManager()
+
+
+def _origin_is_allowed(origin: str) -> bool:
+    if not ALLOWED_ORIGINS or "*" in ALLOWED_ORIGINS:
+        return True
+    if not origin:
+        return False
+    norm = origin.strip().rstrip("/").lower()
+    for allowed in ALLOWED_ORIGINS:
+        a = allowed.lower()
+        if norm == a:
+            return True
+        if a.startswith("*.") and norm.endswith(a[1:]):
+            return True
+        if a.startswith("https://*.") and norm.startswith("https://") and norm.endswith(a[9:]):
+            return True
+    return False
 
 
 def _normalize_api_path(raw_path: str) -> str:
@@ -48,10 +73,15 @@ class MeridianHandler(BaseHTTPRequestHandler):
     def _send_cors_headers(self) -> None:
         origin = (self.headers.get("Origin") or "").strip().rstrip("/")
         if not ALLOWED_ORIGINS or "*" in ALLOWED_ORIGINS:
-            self.send_header("Access-Control-Allow-Origin", "*")
-        elif origin and origin in ALLOWED_ORIGINS:
+            self.send_header("Access-Control-Allow-Origin", origin or "*")
+            if origin:
+                self.send_header("Vary", "Origin")
+        elif origin and _origin_is_allowed(origin):
             self.send_header("Access-Control-Allow-Origin", origin)
             self.send_header("Vary", "Origin")
+        elif origin:
+            sys.stderr.write(f"[py-rl] Blocked CORS origin: {origin} (allowed={ALLOWED_ORIGINS})\n")
+            sys.stderr.flush()
         self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type, Accept")
 
@@ -149,6 +179,8 @@ class MeridianHandler(BaseHTTPRequestHandler):
                     return
 
             self._send_json(404, {"error": "Endpoint not found."})
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            return
         except MarketDataError as e:
             self._send_json(e.status_code, {"error": str(e)})
         except KeyError as e:
@@ -190,6 +222,8 @@ class MeridianHandler(BaseHTTPRequestHandler):
                         return
 
             self._send_json(404, {"error": "Endpoint not found."})
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            return
         except MarketDataError as e:
             self._send_json(e.status_code, {"error": str(e)})
         except KeyError as e:
@@ -247,7 +281,7 @@ class MeridianHandler(BaseHTTPRequestHandler):
                     if current["status"] in ("completed", "stopped", "error"):
                         self._write_sse("done", {"runId": run_id, "status": current["status"], "run": current})
                         break
-        except (BrokenPipeError, ConnectionResetError):
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
             pass
         finally:
             manager.unsubscribe(run_id, q)

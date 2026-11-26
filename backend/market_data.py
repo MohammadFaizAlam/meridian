@@ -118,8 +118,12 @@ def _rate_limited_get(url: str, host_key: str, timeout: float = 10.0) -> bytes:
     req = urllib.request.Request(
         url,
         headers={
-            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) MeridianQuant/2.0",
-            "Accept": "application/json",
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+            ),
+            "Accept": "application/json, text/csv, */*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
         },
     )
     with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -220,6 +224,69 @@ def _fetch_coinbase(symbol: str, interval: str, range_str: str) -> Tuple[List[OH
         "interval": interval,
         "range": range_str,
         "annualizationFactor": 365 * 24 if interval == "1h" else 365,
+        "corporateEvents": [],
+    }
+    return bars, meta
+
+
+def _fetch_stooq(symbol: str, interval: str, range_str: str) -> Tuple[List[OHLCVBar], Dict[str, Any]]:
+    """Fallback daily OHLCV provider via Stooq CSV when Yahoo rate-limits cloud IPs."""
+    if interval != "1d":
+        raise MarketDataError("Stooq fallback only supports daily bars.", 502)
+
+    stooq_sym = symbol.lower()
+    if "." not in stooq_sym and "-" not in stooq_sym and not stooq_sym.startswith("^"):
+        stooq_sym = f"{stooq_sym}.us"
+
+    url = f"https://stooq.com/q/d/l/?s={urllib.parse.quote(stooq_sym)}&i=d"
+    raw = _rate_limited_get(url, "stooq.com", timeout=12.0)
+    text = raw.decode("utf-8", errors="ignore").strip()
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    if len(lines) < 42 or not lines[0].lower().startswith("date,"):
+        raise MarketDataError(f"Stooq did not return valid daily history for '{symbol}'.", 502)
+
+    days = _range_to_days(range_str)
+    cutoff_ts = int(time.time()) - days * 86400
+    bars: List[OHLCVBar] = []
+    for line in lines[1:]:
+        parts = line.split(",")
+        if len(parts) < 5:
+            continue
+        date_str = parts[0].strip()
+        try:
+            dt = datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+            ts = int(dt.timestamp())
+            o, h, l, c = float(parts[1]), float(parts[2]), float(parts[3]), float(parts[4])
+            v = float(parts[5]) if len(parts) > 5 and parts[5] else 0.0
+        except ValueError:
+            continue
+        if ts < cutoff_ts or c <= 0 or math.isnan(c):
+            continue
+        bars.append(
+            OHLCVBar(
+                timestamp=ts,
+                date=date_str,
+                open=o,
+                high=h,
+                low=l,
+                close=c,
+                volume=max(0.0, v),
+            )
+        )
+
+    if len(bars) < 40:
+        raise MarketDataError(f"Insufficient Stooq bars returned for '{symbol}'.", 502)
+
+    name = next((i["name"] for i in CURATED_INSTRUMENTS if i["symbol"] == symbol), symbol)
+    meta = {
+        "symbol": symbol,
+        "name": name,
+        "currency": "USD",
+        "exchange": "US Market",
+        "source": "Stooq Daily CSV",
+        "interval": interval,
+        "range": range_str,
+        "annualizationFactor": 252,
         "corporateEvents": [],
     }
     return bars, meta
@@ -661,6 +728,8 @@ def fetch_market_data(
             ]
         else:
             fetchers = [("yahoo", _fetch_yahoo)]
+            if interval == "1d":
+                fetchers.append(("stooq", _fetch_stooq))
 
         for name, fn in fetchers:
             try:

@@ -10,7 +10,16 @@ import type {
   RunSummary,
 } from '../types/trading';
 
-const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || '').trim().replace(/\/+$/, '');
+function normalizeApiBase(raw: string | undefined): string {
+  const cleaned = (raw || '').trim().replace(/^['"]|['"]$/g, '').replace(/\/+$/, '');
+  if (!cleaned) return '';
+  if (cleaned.startsWith('/') || /^https?:\/\//i.test(cleaned)) {
+    return cleaned;
+  }
+  return `https://${cleaned}`;
+}
+
+const API_BASE_URL = normalizeApiBase(import.meta.env.VITE_API_BASE_URL);
 
 export function getApiUrl(path: string): string {
   if (!API_BASE_URL) return path;
@@ -18,21 +27,46 @@ export function getApiUrl(path: string): string {
 }
 
 async function apiRequest<T>(url: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(getApiUrl(url), {
-    ...init,
-    headers: {
-      'Content-Type': 'application/json',
-      ...(init?.headers || {}),
-    },
-  });
+  const headers: Record<string, string> = {
+    Accept: 'application/json',
+    ...((init?.headers as Record<string, string>) || {}),
+  };
+  if (init?.body !== undefined && !('Content-Type' in headers)) {
+    headers['Content-Type'] = 'application/json';
+  }
+
+  let res: Response;
+  try {
+    res = await fetch(getApiUrl(url), {
+      ...init,
+      headers,
+    });
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : 'Network error';
+    throw new Error(
+      API_BASE_URL
+        ? `Could not reach backend (${API_BASE_URL}): ${detail}. If hosted on Render Free, wait ~30s for wake-up and check ALLOWED_ORIGINS.`
+        : `Backend unreachable: ${detail}`,
+    );
+  }
+
   const text = await res.text();
   let data: unknown = null;
+  let parsedJson = false;
   try {
     data = text ? JSON.parse(text) : null;
+    parsedJson = true;
   } catch {
-    data = { error: text || `HTTP ${res.status}` };
+    const looksHtml = /^\s*</.test(text);
+    data = {
+      error: looksHtml
+        ? !API_BASE_URL
+          ? `Backend URL is not configured (HTTP ${res.status}). Set VITE_API_BASE_URL in Vercel and redeploy.`
+          : `Backend returned HTML instead of JSON (HTTP ${res.status}). Check VITE_API_BASE_URL (${API_BASE_URL}).`
+        : text || `HTTP ${res.status}`,
+    };
   }
-  if (!res.ok) {
+  if (!res.ok || !parsedJson) {
     const errMsg =
       typeof data === 'object' && data !== null && 'error' in data
         ? String((data as { error: unknown }).error)
