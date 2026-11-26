@@ -155,9 +155,26 @@ export async function deleteTrainingRun(runId: string): Promise<void> {
   });
 }
 
-export async function executeBacktest(runId: string, overrideSymbol?: string): Promise<BacktestResult> {
+export async function executeBacktest(
+  runId: string,
+  overrideSymbol?: string,
+  fallbackRun?: Partial<RunDetail> | null,
+): Promise<BacktestResult> {
+  const payload: Record<string, unknown> = {};
+  if (overrideSymbol) payload.symbol = overrideSymbol;
+  if (fallbackRun?.checkpoint) {
+    payload.fallbackRun = {
+      id: fallbackRun.id,
+      createdAt: fallbackRun.createdAt,
+      updatedAt: fallbackRun.updatedAt,
+      status: fallbackRun.status,
+      config: fallbackRun.config,
+      split: fallbackRun.split,
+      checkpoint: fallbackRun.checkpoint,
+    };
+  }
   return apiRequest<BacktestResult>(`/api/runs/${encodeURIComponent(runId)}/backtest`, {
     method: 'POST',
-    body: JSON.stringify(overrideSymbol ? { symbol: overrideSymbol } : {}),
+    body: JSON.stringify(payload),
   });
 }

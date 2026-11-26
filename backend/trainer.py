@@ -549,9 +549,64 @@ class TrainingManager:
         self._emit(job, "status", {"runId": run_id, "status": job.status})
         return self.serialize_run_summary(job)
 
-    def run_backtest(self, run_id: str, override_symbol: Optional[str] = None) -> Dict[str, Any]:
+    def _restore_job_from_payload(
+        self, run_id: str, fallback_run: Dict[str, Any]
+    ) -> Optional[ActiveJob]:
+        if not isinstance(fallback_run, dict):
+            return None
+        checkpoint = fallback_run.get("checkpoint")
+        if not isinstance(checkpoint, dict):
+            return None
+        weights = checkpoint.get("agentWeights")
+        scaler = checkpoint.get("scaler")
+        cfg_dict = fallback_run.get("config")
+        if (
+            not isinstance(weights, dict)
+            or weights.get("version") != 2
+            or not isinstance(scaler, dict)
+            or not isinstance(cfg_dict, dict)
+        ):
+            return None
+
+        cfg = RunConfig(**{k: v for k, v in cfg_dict.items() if k in RunConfig.__dataclass_fields__})
+        episodes_raw = fallback_run.get("episodes")
+        episodes = episodes_raw if isinstance(episodes_raw, list) else []
+        split_raw = fallback_run.get("split")
+        split_info = split_raw if isinstance(split_raw, dict) else {}
+        train_trace = fallback_run.get("trainTrace") if isinstance(fallback_run.get("trainTrace"), dict) else None
+        status = str(fallback_run.get("status") or "completed")
+        if status in ("running", "paused", "queued"):
+            status = "completed"
+
+        job = ActiveJob(
+            run_id=run_id,
+            config=cfg,
+            status=status,
+            created_at=str(fallback_run.get("createdAt") or _utc_now_iso()),
+            updated_at=str(fallback_run.get("updatedAt") or _utc_now_iso()),
+            split_info=split_info,
+            scaler=scaler,
+            episodes_history=episodes,
+            train_trace=train_trace,
+            agent_weights=weights,
+            backtest_result=None,
+            error_message=None,
+        )
+        with self._global_lock:
+            self._jobs[run_id] = job
+        self._persist_job(job)
+        return job
+
+    def run_backtest(
+        self,
+        run_id: str,
+        override_symbol: Optional[str] = None,
+        fallback_run: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         """Evaluate saved best checkpoint deterministically on strictly unseen test data."""
         job = self._jobs.get(run_id)
+        if not job and fallback_run:
+            job = self._restore_job_from_payload(run_id, fallback_run)
         if not job:
             raise KeyError(f"Run '{run_id}' not found.")
         if not job.agent_weights or not job.scaler:
@@ -672,9 +727,18 @@ class TrainingManager:
     def serialize_run_detail(self, job: ActiveJob) -> Dict[str, Any]:
         summary = self.serialize_run_summary(job)
         with job.lock:
+            checkpoint = (
+                {
+                    "scaler": job.scaler,
+                    "agentWeights": job.agent_weights,
+                }
+                if (job.agent_weights is not None and job.agent_weights.get("version") == 2 and job.scaler)
+                else None
+            )
             return {
                 **summary,
                 "episodes": list(job.episodes_history),
                 "trainTrace": job.train_trace,
                 "backtest": job.backtest_result,
+                "checkpoint": checkpoint,
             }

@@ -203,10 +203,16 @@ export interface RunSummary {
   errorMessage: string | null;
 }
 
+export interface RunCheckpoint {
+  scaler: { means: number[]; stds: number[] };
+  agentWeights: Record<string, unknown>;
+}
+
 export interface RunDetail extends RunSummary {
   episodes: EpisodeSummary[];
   trainTrace: TracePayload | null;
   backtest: BacktestResult | null;
+  checkpoint?: RunCheckpoint | null;
 }
 
 export interface ForecastTrajectoryPoint {

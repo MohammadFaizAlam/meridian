@@ -217,7 +217,12 @@ class MeridianHandler(BaseHTTPRequestHandler):
                         return
                     if action == "backtest":
                         override_sym = body.get("symbol") if isinstance(body, dict) else None
-                        result = manager.run_backtest(run_id, override_symbol=override_sym)
+                        fallback_run = body.get("fallbackRun") if isinstance(body, dict) else None
+                        result = manager.run_backtest(
+                            run_id,
+                            override_symbol=override_sym,
+                            fallback_run=fallback_run,
+                        )
                         self._send_json(200, result)
                         return
 

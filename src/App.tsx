@@ -56,6 +56,46 @@ const NAV_TABS: {
   { id: 'ledger', label: 'Trades', title: 'Trades — Buy & Sell History', Icon: ReceiptText },
 ];
 
+const RUN_CHECKPOINT_CACHE_KEY = 'meridian-run-checkpoints-v1';
+
+function readCachedCheckpoints(): Record<string, Partial<RunDetail>> {
+  try {
+    const raw = localStorage.getItem(RUN_CHECKPOINT_CACHE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? (parsed as Record<string, Partial<RunDetail>>) : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveCachedCheckpoint(detail: RunDetail): void {
+  if (!detail.checkpoint) return;
+  try {
+    const current = readCachedCheckpoints();
+    current[detail.id] = {
+      id: detail.id,
+      createdAt: detail.createdAt,
+      updatedAt: detail.updatedAt,
+      status: detail.status,
+      config: detail.config,
+      split: detail.split,
+      checkpoint: detail.checkpoint,
+    };
+    const entries = Object.entries(current).sort((a, b) =>
+      String(b[1].updatedAt || '').localeCompare(String(a[1].updatedAt || '')),
+    );
+    localStorage.setItem(RUN_CHECKPOINT_CACHE_KEY, JSON.stringify(Object.fromEntries(entries.slice(0, 5))));
+  } catch {
+    // Ignore storage quota errors
+  }
+}
+
+function getCachedCheckpoint(runId: string): Partial<RunDetail> | null {
+  const all = readCachedCheckpoints();
+  return all[runId] || null;
+}
+
 function getInitialTheme(): 'dark' | 'light' {
   if (typeof document !== 'undefined') {
     return document.documentElement.classList.contains('dark') ? 'dark' : 'light';
@@ -198,7 +238,10 @@ export default function App() {
       es.addEventListener('done', (ev: MessageEvent) => {
         try {
           const payload = JSON.parse(ev.data) as { run: RunDetail };
-          if (payload.run) setActiveRun(payload.run);
+          if (payload.run) {
+            setActiveRun(payload.run);
+            saveCachedCheckpoint(payload.run);
+          }
         } catch {}
         closeStream();
         refreshRunsList();
@@ -227,14 +270,19 @@ export default function App() {
       try {
         const detail = await fetchRunDetail(runId);
         setActiveRun(detail);
+        saveCachedCheckpoint(detail);
         if (detail.status === 'running' || detail.status === 'paused') {
           attachStream(runId);
         }
       } catch (err) {
-        setActionError(err instanceof Error ? err.message : 'Unable to load run.');
+        const msg = err instanceof Error ? err.message : 'Unable to load run.';
+        if (/not found/i.test(msg)) {
+          refreshRunsList();
+        }
+        setActionError(msg);
       }
     },
-    [attachStream, setActiveRunId],
+    [attachStream, refreshRunsList, setActiveRunId],
   );
 
   // Boot instruments, runs, and restore persisted run selection
@@ -395,18 +443,35 @@ export default function App() {
   const handleRunBacktest = async (runId: string, overrideSymbol?: string) => {
     setIsRunningBacktest(true);
     setBacktestError(null);
+    const fallbackRun =
+      activeRun && activeRun.id === runId && activeRun.checkpoint
+        ? activeRun
+        : getCachedCheckpoint(runId);
     try {
-      const result = await executeBacktest(runId, overrideSymbol);
+      const result = await executeBacktest(runId, overrideSymbol, fallbackRun);
       if (result.isTransferTest) {
         setTransferResult(result);
       } else {
         setTransferResult(null);
         const refreshed = await fetchRunDetail(runId);
         setActiveRun(refreshed);
+        saveCachedCheckpoint(refreshed);
         await refreshRunsList();
       }
     } catch (err) {
-      setBacktestError(err instanceof Error ? err.message : 'Backtest execution failed.');
+      const msg = err instanceof Error ? err.message : 'Backtest execution failed.';
+      if (/not found/i.test(msg)) {
+        const latestRuns = await refreshRunsList();
+        if (!latestRuns.some((r) => r.id === runId) && activeRun?.id === runId) {
+          setActiveRun(null);
+          setActiveRunId(null);
+        }
+        setBacktestError(
+          `Run '${runId}' expired on the server (Render free tier clears storage when sleeping or restarting). Train a new run to test it.`,
+        );
+      } else {
+        setBacktestError(msg);
+      }
     } finally {
       setIsRunningBacktest(false);
     }
