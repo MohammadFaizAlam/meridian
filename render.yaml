@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: meridian-rl-backend
+    runtime: python
+    plan: free
+    buildCommand: ""
+    startCommand: "python3 backend/server.py"
+    healthCheckPath: "/api/health"
+    envVars:
+      - key: HOST
+        value: "0.0.0.0"
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      - key: ALLOWED_ORIGINS
+        sync: false

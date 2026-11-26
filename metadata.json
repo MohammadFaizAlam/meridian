@@ -1,0 +1,6 @@
+{
+  "name": "Meridian RL",
+  "description": "Reinforcement learning trading research workstation with real historical market data, realistic execution modeling, live training telemetry, and out-of-sample backtesting.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
